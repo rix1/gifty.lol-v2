@@ -1,13 +1,74 @@
 import { Head } from "$fresh/runtime.ts";
-import { encodeBase58 } from "$std/encoding/base58.ts";
+import { Handlers } from "$fresh/server.ts";
+import { addUser, addUserSchema, loadCircle } from "../../services/database.ts";
+import { Circle } from "../../shared/api.ts";
 
-const circles = new Array(2).fill(0).map((_, i) => ({
-  id: encodeBase58(crypto.getRandomValues(new Uint8Array(8))),
-  name: `Circle ${i}`,
-}));
+export const handler: Handlers = {
+  GET: async (req, ctx) => {
+    const circleId = ctx.params.circleId;
+    const accept = req.headers.get("accept");
+    const url = new URL(req.url);
 
-export default function Home() {
-  // support dark theme by using bg-slate-900 and white text, if light theme use bg-white and black text
+    if (accept === "text/event-stream") {
+      const bc = new BroadcastChannel(`list/${circleId}`);
+      const body = new ReadableStream({
+        start(controller) {
+          bc.addEventListener("message", async () => {
+            try {
+              const data = await loadCircle(circleId, "strong");
+              const chunk = `data: ${JSON.stringify(data)}\n\n`;
+              controller.enqueue(new TextEncoder().encode(chunk));
+            } catch (e) {
+              console.error(`Error refreshing list ${circleId}`, e);
+            }
+          });
+          console.log(
+            `Opened stream for list ${circleId} remote ${
+              JSON.stringify(ctx.remoteAddr)
+            }`,
+          );
+        },
+        cancel() {
+          bc.close();
+          console.log(
+            `Closed stream for list ${circleId} remote ${
+              JSON.stringify(ctx.remoteAddr)
+            }`,
+          );
+        },
+      });
+      return new Response(body, {
+        headers: {
+          "content-type": "text/event-stream",
+        },
+      });
+    }
+
+    const startTime = Date.now();
+    const data = await loadCircle(
+      circleId,
+      url.searchParams.get("consistency") === "strong" ? "strong" : "eventual",
+    );
+    const endTime = Date.now();
+    const res = await ctx.render({ data, latency: endTime - startTime });
+    res.headers.set("x-list-load-time", "" + (endTime - startTime));
+    return res;
+  },
+  POST: async (req, ctx) => {
+    const circleId = ctx.params.circleId;
+    const body = addUserSchema.parse(await req.json());
+    await addUser(circleId, body);
+
+    const bc = new BroadcastChannel(`circle/${circleId}`);
+    bc.postMessage("" + Date.now());
+    return Response.json({ ok: true });
+  },
+};
+
+export default function Home(
+  { data: { data, latency } }: { data: { data: Circle; latency: number } },
+) {
+  console.log(data);
 
   return (
     <>
@@ -54,23 +115,13 @@ export default function Home() {
                 </path>
               </g>
             </svg>
-            Welcome to Gifty.lol{" "}
-            <span className="font-normal text-sm">(v2)</span>
+            Your room{" "}
+            <span className="font-normal text-slate-400">
+              {data.members.length}
+            </span>
           </h1>
-          <p className="mt-4 mb-3">Your circles</p>
+          <p className="mt-4 mb-3">Members</p>
           <div class="grid grid-cols-3 gap-5">
-            {circles.map((circle) => (
-              <div class="p-4 rounded-lg shadow-lg dark:bg-slate-800">
-                <h2 class="font-bold text-xl">{circle.name}</h2>
-                <p class="text-gray-600">ID: {circle.id}</p>
-                <a
-                  href={`/circle/${circle.id}`}
-                  class="inline-block px-4 py-2 mt-4 text-white bg-slate-600 rounded-lg"
-                >
-                  Open
-                </a>
-              </div>
-            ))}
             <div class="border-2 border-dashed rounded-lg flex items-center justify-center">
               <a
                 href="/circle/new"
@@ -78,17 +129,19 @@ export default function Home() {
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 20 20"
-                  fill="currentColor"
-                  className="w-5 h-5 text-slate-400"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={1.5}
+                  stroke="currentColor"
+                  className="w-5 h-5 text-slate-300"
                 >
                   <path
-                    fillRule="evenodd"
-                    d="M10 18a8 8 0 100-16 8 8 0 000 16zm.75-11.25a.75.75 0 00-1.5 0v2.5h-2.5a.75.75 0 000 1.5h2.5v2.5a.75.75 0 001.5 0v-2.5h2.5a.75.75 0 000-1.5h-2.5v-2.5z"
-                    clipRule="evenodd"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 4.5v15m7.5-7.5h-15"
                   />
                 </svg>
-                Create new circle
+                New member
               </a>
             </div>
           </div>
